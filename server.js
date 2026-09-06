@@ -599,10 +599,34 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     },
     async send(chat_id,text,extra={}) { return this.call('sendMessage',{chat_id,text,...extra}); },
     async handle(update) {
-      const msg = update?.message; if(!msg?.text) return;
-      const text = msg.text.trim(); const chatId = msg.chat.id;
-      const tgUsername = normalizeTelegram(msg.from?.username || '');
+const msg = update?.message;
+if (!msg?.text) return;
 
+const text = msg.text.trim();
+const chatId = msg.chat.id;
+const chatType = msg.chat.type;
+
+const tgUsername = normalizeTelegram(msg.from?.username || '');
+
+if (!tgUsername) {
+    return this.send(
+        chatId,
+        `⚠️ У вас не установлен Username (имя пользователя) в Telegram.\nПожалуйста, укажите имя пользователя в настройках Telegram (@username), чтобы сайт смог распознать вас.`
+    );
+}
+
+// Бот принимает регистрацию только из личного чата.
+// В группах username не связываем с chat_id группы.
+if (chatType !== 'private') {
+    return;
+}
+
+await supabase.from('telegram_links').upsert({
+    username: tgUsername,
+    chat_id: chatId,
+    verified: true,
+    updated_at: nowIso()
+}, { onConflict: 'username' });
       if (!tgUsername) {
         return this.send(chatId, `⚠️ У вас не установлен Username (имя пользователя) в Telegram.\nПожалуйста, укажите имя пользователя в настройках Telegram (@username), чтобы сайт смог распознать вас.`);
       }
