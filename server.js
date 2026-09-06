@@ -588,113 +588,651 @@ app.get('/api/manager/dashboard', authRequired, roleRequired('admin','manager'),
 });
 
 // ---------------- Telegram ----------------
+
 let telegram = null;
+
 const webhookPath = process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook';
 
 if (process.env.TELEGRAM_BOT_TOKEN) {
-  telegram = {
-    async call(method, body) {
-      const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-      const json = await r.json(); if(!json.ok) throw new Error(json.description || 'Telegram API error'); return json.result;
-    },
-    async send(chat_id,text,extra={}) { return this.call('sendMessage',{chat_id,text,...extra}); },
-    async handle(update) {
-const msg = update?.message;
-if (!msg?.text) return;
 
-const text = msg.text.trim();
-const chatId = msg.chat.id;
-const chatType = msg.chat.type;
+    telegram = {
 
-const tgUsername = normalizeTelegram(msg.from?.username || '');
+        async call(method, body = {}) {
+            const r = await fetch(
+                `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(body)
+                }
+            );
 
-if (!tgUsername) {
-    return this.send(
-        chatId,
-        `⚠️ У вас не установлен Username (имя пользователя) в Telegram.\nПожалуйста, укажите имя пользователя в настройках Telegram (@username), чтобы сайт смог распознать вас.`
+            const json = await r.json();
+
+            if (!json.ok) {
+                throw new Error(
+                    json.description || 'Telegram API error'
+                );
+            }
+
+            return json.result;
+        },
+
+        async send(chat_id, text, extra = {}) {
+            return this.call('sendMessage', {
+                chat_id,
+                text,
+                ...extra
+            });
+        },
+
+        async registerPrivateChat(msg) {
+            const chatId = msg.chat.id;
+            const tgUsername = normalizeTelegram(
+                msg.from?.username || ''
+            );
+
+            if (!tgUsername) {
+                await this.send(
+                    chatId,
+                    `⚠️ У вас не установлен Username в Telegram.
+
+Пожалуйста, укажите @username в настройках Telegram, чтобы сайт смог распознать вас.`
+                );
+
+                return null;
+            }
+
+            /*
+             * ВАЖНО:
+             * telegram_links хранит ТОЛЬКО личный chat_id пользователя.
+             * Групповые chat_id сюда никогда не записываются.
+             */
+
+            const { error } = await supabase
+                .from('telegram_links')
+                .upsert(
+                    {
+                        username: tgUsername,
+                        chat_id: chatId,
+                        verified: true,
+                        updated_at: nowIso()
+                    },
+                    {
+                        onConflict: 'username'
+                    }
+                );
+
+            if (error) {
+                console.error(
+                    '[Telegram] Ошибка сохранения личного чата:',
+                    error
+                );
+
+                throw new Error(
+                    'Не удалось сохранить Telegram пользователя.'
+                );
+            }
+
+            return {
+                chatId,
+                tgUsername
+            };
+        },
+
+        async registerGroup(msg) {
+            const chatId = msg.chat.id;
+
+            if (
+                msg.chat.type !== 'group' &&
+                msg.chat.type !== 'supergroup'
+            ) {
+                return;
+            }
+
+            const title =
+                String(
+                    msg.chat.title ||
+                    'Без названия'
+                ).slice(0, 255);
+
+            const { error } = await supabase
+                .from('telegram_groups')
+                .upsert(
+                    {
+                        chat_id: chatId,
+                        title,
+                        enabled: true,
+                        updated_at: nowIso()
+                    },
+                    {
+                        onConflict: 'chat_id'
+                    }
+                );
+
+            if (error) {
+                console.error(
+                    '[Telegram] Ошибка сохранения группы:',
+                    error
+                );
+            }
+        },
+
+        async sendHomework(chatId) {
+
+            const { data: service } = await supabase
+                .from('service_settings')
+                .select('*')
+                .eq('id', true)
+                .maybeSingle();
+
+            if (service?.stopped) {
+                return this.send(
+                    chatId,
+                    `Сервис остановлен\n\n${service.message || ''}`
+                );
+            }
+
+            const { data: hw, error } = await supabase
+                .from('homework')
+                .select('*')
+                .order('subject');
+
+            if (error) {
+                console.error(
+                    '[Telegram] Ошибка получения ДЗ:',
+                    error
+                );
+
+                return this.send(
+                    chatId,
+                    'Не удалось получить домашнее задание.'
+                );
+            }
+
+            const lines = (hw || []).map(x => {
+                const subject = escapeHtmlTelegram(
+                    x.subject
+                );
+
+                const body = escapeHtmlTelegram(
+                    x.body || 'ДЗ не задано'
+                );
+
+                const due = x.due_text
+                    ? `\nСрок: ${escapeHtmlTelegram(x.due_text)}`
+                    : '';
+
+                return `<b>${subject}</b>\n${body}${due}`;
+            });
+
+            const text =
+                lines.join('\n\n') ||
+                'Домашнее задание пока не задано.';
+
+            return this.send(
+                chatId,
+                text,
+                {
+                    parse_mode: 'HTML'
+                }
+            );
+        },
+
+        async sendHomeworkToAllGroups() {
+
+            const { data: groups, error } = await supabase
+                .from('telegram_groups')
+                .select('chat_id,title')
+                .eq('enabled', true);
+
+            if (error) {
+                console.error(
+                    '[Telegram] Ошибка получения групп:',
+                    error
+                );
+
+                return {
+                    sent: 0,
+                    failed: 0
+                };
+            }
+
+            let sent = 0;
+            let failed = 0;
+
+            for (const group of groups || []) {
+
+                try {
+
+                    await this.sendHomework(
+                        group.chat_id
+                    );
+
+                    sent++;
+
+                } catch (err) {
+
+                    failed++;
+
+                    console.error(
+                        `[Telegram] Не удалось отправить ДЗ в группу ${group.chat_id}:`,
+                        err.message
+                    );
+
+                    /*
+                     * Если бота удалили из группы или чат больше
+                     * недоступен, отключаем группу.
+                     */
+                    if (
+                        /chat not found/i.test(err.message) ||
+                        /bot was kicked/i.test(err.message) ||
+                        /forbidden/i.test(err.message)
+                    ) {
+                        await supabase
+                            .from('telegram_groups')
+                            .update({
+                                enabled: false,
+                                updated_at: nowIso()
+                            })
+                            .eq(
+                                'chat_id',
+                                group.chat_id
+                            );
+                    }
+                }
+            }
+
+            console.log(
+                `[Telegram] ДЗ отправлено в группы: ${sent}, ошибок: ${failed}`
+            );
+
+            return {
+                sent,
+                failed
+            };
+        },
+
+        async handle(update) {
+
+            const msg = update?.message;
+
+            if (!msg?.text) {
+                return;
+            }
+
+            const text = msg.text.trim();
+
+            const chatId = msg.chat.id;
+
+            const chatType = msg.chat.type;
+
+            const tgUsername = normalizeTelegram(
+                msg.from?.username || ''
+            );
+
+            /*
+             * ------------------------------------------------
+             * ГРУППА / СУПЕРГРУППА
+             * ------------------------------------------------
+             */
+
+            if (
+                chatType === 'group' ||
+                chatType === 'supergroup'
+            ) {
+
+                /*
+                 * Сохраняем группу отдельно.
+                 * НИКОГДА не записываем её в telegram_links.
+                 */
+                await this.registerGroup(msg);
+
+                /*
+                 * /dz разрешён в группах.
+                 *
+                 * Поддерживается:
+                 * /dz
+                 * /dz@ИмяБота
+                 */
+                if (
+                    /^\/dz(?:@\w+)?$/i.test(text)
+                ) {
+
+                    try {
+
+                        await this.sendHomework(
+                            chatId
+                        );
+
+                    } catch (err) {
+
+                        console.error(
+                            '[Telegram] Ошибка отправки ДЗ в группу:',
+                            err
+                        );
+                    }
+
+                    return;
+                }
+
+                /*
+                 * Остальные сообщения группы
+                 * бот просто игнорирует.
+                 */
+                return;
+            }
+
+            /*
+             * ------------------------------------------------
+             * ЛИЧНЫЙ ЧАТ
+             * ------------------------------------------------
+             */
+
+            if (chatType !== 'private') {
+                return;
+            }
+
+            /*
+             * В личке нужен Telegram username.
+             */
+            if (!tgUsername) {
+
+                await this.send(
+                    chatId,
+                    `⚠️ У вас не установлен Username в Telegram.
+
+Пожалуйста, укажите @username в настройках Telegram, чтобы сайт смог распознать вас.`
+                );
+
+                return;
+            }
+
+            /*
+             * ------------------------------------------------
+             * /start
+             * ------------------------------------------------
+             *
+             * Именно здесь сохраняется ЛИЧНЫЙ chat_id.
+             */
+
+            if (
+                /^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)
+            ) {
+
+                try {
+
+                    await this.registerPrivateChat(msg);
+
+                    await this.send(
+                        chatId,
+                        `HomeworkAI
+
+Telegram подтверждён (@${tgUsername}).
+
+Вернитесь на сайт и продолжите регистрацию.
+
+Команда /dz покажет текущее домашнее задание.`
+                    );
+
+                } catch (err) {
+
+                    console.error(
+                        '[Telegram] Ошибка /start:',
+                        err
+                    );
+
+                    await this.send(
+                        chatId,
+                        'Не удалось подтвердить Telegram. Попробуйте ещё раз.'
+                    );
+                }
+
+                return;
+            }
+
+            /*
+             * ------------------------------------------------
+             * /dz В ЛИЧКЕ
+             * ------------------------------------------------
+             */
+
+            if (
+                /^\/dz(?:@\w+)?$/i.test(text)
+            ) {
+
+                try {
+
+                    await this.sendHomework(
+                        chatId
+                    );
+
+                } catch (err) {
+
+                    console.error(
+                        '[Telegram] Ошибка /dz в личке:',
+                        err
+                    );
+
+                    await this.send(
+                        chatId,
+                        'Не удалось получить домашнее задание.'
+                    );
+                }
+
+                return;
+            }
+
+            /*
+             * Остальные сообщения личного чата
+             * бот пока игнорирует.
+             */
+        }
+    };
+
+    /*
+     * Используется регистрацией:
+     *
+     * /api/auth/register/start
+     * → telegramSend(private_chat_id, code)
+     */
+    global.telegramSend = telegram.send.bind(telegram);
+
+    /*
+     * ------------------------------------------------
+     * WEBHOOK
+     * ------------------------------------------------
+     */
+
+    app.post(
+        webhookPath,
+        async (req, res) => {
+
+            const secret =
+                req.headers[
+                    'x-telegram-bot-api-secret-token'
+                ];
+
+            if (
+                process.env.TELEGRAM_WEBHOOK_SECRET &&
+                secret !==
+                process.env.TELEGRAM_WEBHOOK_SECRET
+            ) {
+                return res.sendStatus(403);
+            }
+
+            try {
+
+                await telegram.handle(
+                    req.body
+                );
+
+                res.sendStatus(200);
+
+            } catch (e) {
+
+                console.error(
+                    'Telegram update error:',
+                    e
+                );
+
+                /*
+                 * Telegram лучше всегда получать HTTP 200,
+                 * иначе он будет повторно отправлять update.
+                 */
+                res.sendStatus(200);
+            }
+        }
+    );
+
+    /*
+     * ------------------------------------------------
+     * РУЧНАЯ НАСТРОЙКА WEBHOOK
+     * ------------------------------------------------
+     */
+
+    app.get(
+        '/api/admin/telegram/setup',
+        authRequired,
+        roleRequired('admin'),
+        async (_req, res) => {
+
+            const base =
+                (process.env.APP_URL || '')
+                    .replace(/\/+$/, '');
+
+            const url =
+                base + webhookPath;
+
+            if (!base) {
+                return sendError(
+                    res,
+                    400,
+                    'APP_URL не настроен.'
+                );
+            }
+
+            try {
+
+                const result =
+                    await telegram.call(
+                        'setWebhook',
+                        {
+                            url,
+                            secret_token:
+                                process.env.TELEGRAM_WEBHOOK_SECRET ||
+                                undefined,
+                            allowed_updates: [
+                                'message'
+                            ]
+                        }
+                    );
+
+                res.json({
+                    ok: true,
+                    result,
+                    url
+                });
+
+            } catch (e) {
+
+                sendError(
+                    res,
+                    500,
+                    e.message
+                );
+            }
+        }
+    );
+
+} else {
+
+    console.warn(
+        '[WARNING] TELEGRAM_BOT_TOKEN не установлен в .env! Бот работать не будет.'
     );
 }
 
-// Бот принимает регистрацию только из личного чата.
-// В группах username не связываем с chat_id группы.
-if (chatType !== 'private') {
-    return;
-}
-
-await supabase.from('telegram_links').upsert({
-    username: tgUsername,
-    chat_id: chatId,
-    verified: true,
-    updated_at: nowIso()
-}, { onConflict: 'username' });
-      if (!tgUsername) {
-        return this.send(chatId, `⚠️ У вас не установлен Username (имя пользователя) в Telegram.\nПожалуйста, укажите имя пользователя в настройках Telegram (@username), чтобы сайт смог распознать вас.`);
-      }
-
-      await supabase.from('telegram_links').upsert({ username: tgUsername, chat_id: chatId, verified: true, updated_at: nowIso() }, { onConflict: 'username' });
-
-      if (/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
-        return this.send(chatId, `HomeworkAI\n\nTelegram подтверждён (@${tgUsername}). Вернитесь на сайт и продолжите регистрацию.\n\nКоманда /dz покажет текущее домашнее задание.`);
-      }
-      if (/^\/dz(?:@\w+)?$/i.test(text)) {
-        const {data:service} = await supabase.from('service_settings').select('*').eq('id',true).maybeSingle();
-        if (service?.stopped) return this.send(chatId, `Сервис остановлен\n\n${service.message||''}`);
-        const {data:hw} = await supabase.from('homework').select('*').order('subject');
-        const lines = (hw||[]).map(x=>`<b>${escapeHtmlTelegram(x.subject)}</b>\n${escapeHtmlTelegram(x.body||'ДЗ не задано')}${x.due_text?`\nСрок: ${escapeHtmlTelegram(x.due_text)}`:''}`);
-        return this.send(chatId, lines.join('\n\n') || 'Домашнее задание пока не задано.', {parse_mode:'HTML'});
-      }
-    }
-  };
-  
-  global.telegramSend = telegram.send.bind(telegram);
-
-  app.post(webhookPath, async (req, res) => {
-    const secret = req.headers['x-telegram-bot-api-secret-token'];
-    if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
-      return res.sendStatus(403);
-    }
-    try {
-      await telegram.handle(req.body);
-      res.sendStatus(200);
-    } catch (e) {
-      console.error('Telegram update error:', e);
-      res.sendStatus(200);
-    }
-  });
-
-  app.get('/api/admin/telegram/setup', authRequired, roleRequired('admin'), async (_req, res) => {
-    const base = (process.env.APP_URL || '').replace(/\/$/, '');
-    const url = base + webhookPath;
-    if (!base) return sendError(res, 400, 'APP_URL не настроен.');
-    try {
-      const result = await telegram.call('setWebhook', { url, secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message'] });
-      res.json({ ok: true, result, url });
-    } catch (e) {
-      sendError(res, 500, e.message);
-    }
-  });
-} else {
-  console.warn('[WARNING] TELEGRAM_BOT_TOKEN не установлен в .env! Бот работать не будет.');
-}
+/*
+ * ------------------------------------------------
+ * АВТОМАТИЧЕСКАЯ НАСТРОЙКА WEBHOOK
+ * ------------------------------------------------
+ */
 
 async function autoSetupTelegramWebhook() {
-  if (!telegram || !process.env.APP_URL) return;
-  const base = process.env.APP_URL.replace(/\/$/, '');
-  if (!base.startsWith('https://')) {
-    console.warn(`[Telegram] Внимание: APP_URL равен "${base}". Webhook в Telegram требует протокол HTTPS! При тестировании локально используйте ngrok или аналоги.`);
-    return;
-  }
-  const url = base + webhookPath;
-  try {
-    await telegram.call('setWebhook', { url, secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message'] });
-    console.log(`[Telegram] Webhook автоматически зарегистрирован: ${url}`);
-  } catch (err) {
-    console.error(`[Telegram] Ошибка при авто-регистрации Webhook:`, err.message);
-  }
+
+    if (
+        !telegram ||
+        !process.env.APP_URL
+    ) {
+        return;
+    }
+
+    const base =
+        process.env.APP_URL
+            .replace(/\/+$/, '');
+
+    if (!base.startsWith('https://')) {
+
+        console.warn(
+            `[Telegram] Внимание: APP_URL равен "${base}". Webhook Telegram требует HTTPS.`
+        );
+
+        return;
+    }
+
+    const url =
+        base + webhookPath;
+
+    try {
+
+        await telegram.call(
+            'setWebhook',
+            {
+                url,
+                secret_token:
+                    process.env.TELEGRAM_WEBHOOK_SECRET ||
+                    undefined,
+                allowed_updates: [
+                    'message'
+                ]
+            }
+        );
+
+        console.log(
+            `[Telegram] Webhook автоматически зарегистрирован: ${url}`
+        );
+
+    } catch (err) {
+
+        console.error(
+            '[Telegram] Ошибка при авто-регистрации Webhook:',
+            err.message
+        );
+    }
 }
 
-function escapeHtmlTelegram(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+/*
+ * ------------------------------------------------
+ * ОТПРАВКА ДЗ ВО ВСЕ СОХРАНЁННЫЕ ГРУППЫ
+ * ------------------------------------------------
+ *
+ * Сейчас функция просто доступна серверу.
+ * Её можно вызвать, например:
+ *
+ * await telegram.sendHomeworkToAllGroups();
+ *
+ * Пока сама по расписанию она не вызывается.
+ */
 
+function escapeHtmlTelegram(v) {
+    return String(v)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
 // ---------------- errors + SPA ----------------
 app.use((err,_req,res,_next)=>{ console.error(err); sendError(res,500,'Внутренняя ошибка сервера.'); });
 app.use('/api',(_req,res)=>sendError(res,404,'API маршрут не найден.'));
