@@ -424,9 +424,12 @@ app.post('/api/support/message', authRequired, serviceRequired, aiLimiter, async
   const prompt = `Ты AI поддержки HomeworkAI. Отвечай кратко, вежливо и по делу. Ниже FAQ, которым нужно пользоваться. Если вопрос требует действий человека — начни ответ с маркера HUMAN_NEEDED. В остальных случаях начни с AI_ONLY.\n\nFAQ:\n${(faq?.content||'Нет FAQ').slice(0,30000)}\n\nСообщение пользователя:\n${content}`;
   let answer;
   try {
-    answer = await callAI('deepseek', [
-      { role:'system', content:prompt },
-      ...((history||[]).reverse().map(x=>({ role:x.sender_type==='user'?'user':'assistant', content:x.content })))
+    answer = await callAI('gemini', [
+        { role:'system', content:prompt },
+        ...((history||[]).reverse().map(x=>({
+            role:x.sender_type==='user'?'user':'assistant',
+            content:x.content
+        })))
     ]);
   } catch (e) { return sendError(res,502,e.message || 'AI поддержки недоступен.'); }
   const human = /^\s*HUMAN_NEEDED/i.test(answer) || /позвать человека|оператора|администратора/i.test(answer);
