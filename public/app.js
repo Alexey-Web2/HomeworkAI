@@ -41,7 +41,89 @@ function plansView(){const cards=[['Start',25,'ChatGPT','5 сообщений з
 async function requestPlan(plan){try{await api('/api/plans/request',{method:'POST',body:JSON.stringify({plan})});toast(`Запрос на ${plan} отправлен`)}catch(e){toast(e.message,true)}}
 function supportView(){return shell(`<div class="hero"><div><h1>Поддержка</h1><p>Сначала отвечает DeepSeek. После передачи человеку AI полностью перестаёт отвечать.</p></div></div><div id="support-render"><div class="empty">Загрузка…</div></div>`)}
 async function loadSupport(){try{state.support=await api('/api/support');render();startSupportPoll()}catch(e){toast(e.message,true)}}
-let supportTimer;function startSupportPoll(){clearInterval(supportTimer);supportTimer=setInterval(async()=>{if(state.route!=='support')return;try{state.support=await api('/api/support');const box=$('#support-render');if(box)box.innerHTML=supportBody();}catch{}},4000)}
+let supportTimer;
+
+function startSupportPoll(){
+    clearInterval(supportTimer);
+
+    supportTimer=setInterval(async()=>{
+        if(state.route!=='support')return;
+
+        try{
+            const wasFocused=document.activeElement?.id==='support-input';
+            const input=$('#support-input');
+            const draft=input?.value || '';
+
+            state.support=await api('/api/support');
+
+            const box=$('#support-render');
+
+            if(!box)return;
+
+            /*
+             * Если пользователь сейчас пишет сообщение,
+             * не уничтожаем textarea и не теряем введённый текст.
+             */
+            if(wasFocused){
+                const messages=$('#support-messages');
+
+                if(messages){
+                    messages.outerHTML=`
+                        <div class="messages" id="support-messages"
+                             style="min-height:420px;max-height:60vh;margin:0 -2px 10px">
+                            ${state.support.messages.map(m=>`
+                                <div class="bubble ${
+                                    m.sender_type==='user'
+                                        ? 'user'
+                                        : m.sender_type==='human'
+                                            ? 'human'
+                                            : m.sender_type==='system'
+                                                ? 'system'
+                                                : 'ai'
+                                }">
+                                    <div>${html(m.content)}</div>
+                                    <div class="bubble-meta">
+                                        ${
+                                            m.sender_type==='user'
+                                                ? 'Вы'
+                                                : m.sender_type==='human'
+                                                    ? 'Администратор'
+                                                    : m.sender_type==='system'
+                                                        ? 'Система'
+                                                        : 'AI поддержки'
+                                        } · ${date(m.created_at)}
+                                    </div>
+                                </div>
+                            `).join('') || '<div class="empty">Напишите, что произошло.</div>'}
+                        </div>
+                    `;
+                }
+
+                /*
+                 * Возвращаем введённый текст.
+                 */
+                const newInput=$('#support-input');
+                if(newInput){
+                    newInput.value=draft;
+                    newInput.focus();
+                    newInput.setSelectionRange(
+                        newInput.value.length,
+                        newInput.value.length
+                    );
+                }
+
+                return;
+            }
+
+            /*
+             * Если пользователь ничего не вводит,
+             * обычное обновление чата.
+             */
+            box.innerHTML=supportBody();
+
+        }catch{}
+    },4000);
+}
 function supportBody(){const s=state.support;if(!s)return '<div class="empty">Нет данных</div>';return `<div class="panel"><div class="chat-head" style="padding:0 0 14px;border:0"><div><h2>Чат с поддержкой</h2><div class="quota">${s.chat.human_requested?'Подключён человек':'AI поддержки активен'}</div></div><div style="display:flex;gap:8px"><button class="btn btn-ghost btn-small" onclick="requestHuman()">Позвать человека</button><button class="btn btn-danger btn-small" onclick="closeSupport()">Закрыть</button></div></div><div class="messages" id="support-messages" style="min-height:420px;max-height:60vh;margin:0 -2px 10px">${s.messages.map(m=>`<div class="bubble ${m.sender_type==='user'?'user':m.sender_type==='human'?'human':m.sender_type==='system'?'system':'ai'}"><div>${html(m.content)}</div><div class="bubble-meta">${m.sender_type==='user'?'Вы':m.sender_type==='human'?'Администратор':m.sender_type==='system'?'Система':'AI поддержки'} · ${date(m.created_at)}</div></div>`).join('')||'<div class="empty">Напишите, что произошло.</div>'}</div><div class="chat-compose"><textarea class="textarea" id="support-input" placeholder="Опишите проблему…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendSupport()}"></textarea><button class="btn btn-primary send" onclick="sendSupport()">➤</button></div></div>`}
 async function sendSupport(){const i=$('#support-input'),v=i?.value.trim();if(!v)return;try{i.value='';await api('/api/support/message',{method:'POST',body:JSON.stringify({content:v})});state.support=await api('/api/support');const box=$('#support-render');if(box)box.innerHTML=supportBody();scrollChat('#support-messages')}catch(e){toast(e.message,true)}}
 async function requestHuman(){try{await api('/api/support/request-human',{method:'POST'});state.support=await api('/api/support');$('#support-render').innerHTML=supportBody();toast('Администратор вызван')}catch(e){toast(e.message,true)}}
