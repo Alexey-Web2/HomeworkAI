@@ -37,7 +37,7 @@ function baseNav(){const service=`<div class="topbar"><div class="topbar-left">$
 function shell(content,extra=''){return `${baseNav()}<main class="page fade">${content}</main>${extra}`}
 function homeView(){if(!state.home)return shell('<div class="empty">Загрузка…</div>',quickButtons());return shell(`<div class="hero"><div><h1>Домашнее задание</h1><p>Текущее ДЗ, решения и быстрый AI-помощник.</p></div><div class="hero-actions"><button class="btn btn-dark" onclick="openSolutions()">Посмотреть решения AI</button></div></div>${state.home.announcements.map(a=>`<div class="announcement"><strong>${html(a.title)}</strong><div>${html(a.body)}</div><div class="meta">Показывается до ${date(a.expires_at)}</div></div>`).join('')}<div class="section"><h2 class="section-title">Предметы</h2><div class="subjects">${state.home.homework.map(h=>`<div class="subject-card"><div><div class="subject-title">${html(h.subject)}</div>${h.title?`<div class="muted" style="margin-top:5px">${html(h.title)}</div>`:''}</div><div><div class="hw-title">${h.body?html(h.body):'<span class="hw-empty">Домашнее задание не задано.</span>'}</div>${h.due_text?`<span class="due">Срок: ${html(h.due_text)}</span>`:''}</div><div>${h.body?`<button class="btn btn-primary btn-small" onclick="solveHomework('${h.id}')">Решить AI</button>`:''}</div></div>`).join('')}</div></div>`,quickButtons())}
 function quickButtons(){return `<button class="quick-ai" onclick="go('ai')" title="AI чат">✦</button>${state.user.role==='admin'?'<button class="admin-shortcut" onclick="go(\'admin\')">ADMIN</button>':''}${state.user.role==='manager'?'<button class="admin-shortcut" onclick="go(\'manager\')">MANAGER</button>':''}`}
-function plansView(){const cards=[['Start',25,'ChatGPT','5 сообщений за 12 часов',['ChatGPT','1 неделя']],['Plus',50,'ChatGPT + Gemini','10 сообщений за 12 часов',['ChatGPT','Gemini','1 неделя']],['Pro',100,'Все AI','Без ограничений',['ChatGPT','Gemini','1 неделя']]];return shell(`<div class="hero"><div><h1>Планы</h1><p>План действует 7 дней. Оплата проходит через администрацию.</p></div></div><div class="plans-grid">${cards.map(([n,p,models,limit,features],i)=>`<article class="plan-card ${n==='Plus'?'featured':''}">${n==='Plus'?'<span class="badge-featured">ПОПУЛЯРНЫЙ</span>':''}<h3>${n}</h3><div class="plan-price">${p} <small>★</small></div><div style="font-weight:800">${models}</div><p class="muted">${limit}</p><ul class="plan-list">${features.map(x=>`<li>${x}</li>`).join('')}</ul><button class="btn ${n==='Plus'?'btn-primary':'btn-dark'} btn-block" onclick="requestPlan('${n}')">Выбрать ${n}</button></article>`).join('')}</div><div class="notice section"><b>Покупка:</b> отправьте подарок/оплату представителю администрации в Telegram. После проверки администратор вручную выдаст выбранный план на 7 дней.</div>`)}
+function plansView(){const cards=[['Start',25,'Gemini','5 сообщений за 12 часов',['ChatGPT','1 неделя']],['Plus',50,'ChatGPT + Gemini','10 сообщений за 12 часов',['ChatGPT','Gemini','1 неделя']],['Pro',100,'Все AI','Без ограничений',['ChatGPT','Gemini','1 неделя']]];return shell(`<div class="hero"><div><h1>Планы</h1><p>План действует 7 дней. Оплата проходит через администрацию.</p></div></div><div class="plans-grid">${cards.map(([n,p,models,limit,features],i)=>`<article class="plan-card ${n==='Plus'?'featured':''}">${n==='Plus'?'<span class="badge-featured">ПОПУЛЯРНЫЙ</span>':''}<h3>${n}</h3><div class="plan-price">${p} <small>★</small></div><div style="font-weight:800">${models}</div><p class="muted">${limit}</p><ul class="plan-list">${features.map(x=>`<li>${x}</li>`).join('')}</ul><button class="btn ${n==='Plus'?'btn-primary':'btn-dark'} btn-block" onclick="requestPlan('${n}')">Выбрать ${n}</button></article>`).join('')}</div><div class="notice section"><b>Покупка:</b> отправьте подарок/оплату представителю администрации в Telegram. После проверки администратор вручную выдаст выбранный план на 7 дней.</div>`)}
 async function requestPlan(plan){try{await api('/api/plans/request',{method:'POST',body:JSON.stringify({plan})});toast(`Запрос на ${plan} отправлен`)}catch(e){toast(e.message,true)}}
 function supportView(){return shell(`<div class="hero"><div><h1>Поддержка</h1><p>Сначала отвечает DeepSeek. После передачи человеку AI полностью перестаёт отвечать.</p></div></div><div id="support-render"><div class="empty">Загрузка…</div></div>`)}
 async function loadSupport(){try{state.support=await api('/api/support');render();startSupportPoll()}catch(e){toast(e.message,true)}}
@@ -135,7 +135,26 @@ function openSettings(){openModal('Настройки аккаунта',`<div cl
 async function saveUsername(){try{const v=$('#set-username').value.trim();const d=await api('/api/account/username',{method:'POST',body:JSON.stringify({username:v})});state.user=d.user;closeModal();render();toast('Никнейм изменён')}catch(e){toast(e.message,true)}}
 async function savePassword(){try{await api('/api/account/password',{method:'POST',body:JSON.stringify({current_password:$('#cur-pass').value,new_password:$('#new-pass').value})});closeModal();toast('Пароль изменён. Войдите снова.');await logout()}catch(e){toast(e.message,true)}}
 async function deleteRequest(){try{await api('/api/account/delete-request',{method:'POST'});toast('Запрос отправлен администрации')}catch(e){toast(e.message,true)}}
-function modelSelect(){const plan=state.user?.plan||'Standard';const canChat=['Start','Plus','Pro'].includes(plan);const canGemini=['Plus','Pro'].includes(plan);if(state.ai.model==='gemini'&&!canGemini)state.ai.model='chatgpt';return `<select class="select" id="ai-model" onchange="changeAiSettings()"><option value="chatgpt" ${canChat?'':'disabled'}>ChatGPT${canChat?'':' — нет доступа'}</option><option value="gemini" ${canGemini?'':'disabled'}>Gemini${canGemini?'':' — Plus/Pro'}</option></select>`}
+function modelSelect(){
+    const plan=state.user?.plan||'Standard';
+    const canChat=['Plus','Pro'].includes(plan);
+    const canGemini=['Start','Plus','Pro'].includes(plan);
+
+    if(state.ai.model==='chatgpt' && !canChat){
+        state.ai.model='gemini';
+    }
+
+    return `
+        <select class="select" id="ai-model" onchange="changeAiSettings()">
+            <option value="chatgpt" ${canChat?'':'disabled'}>
+                ChatGPT${canChat?'':' — нет доступа'}
+            </option>
+            <option value="gemini" ${canGemini?'':'disabled'}>
+                Gemini${canGemini?'':' — нет доступа'}
+            </option>
+        </select>
+    `;
+}
 function aiChatView(){return shell(`<div class="hero"><div><h1>AI чат</h1><p>Выберите предмет и модель, затем задайте вопрос.</p></div></div><div class="chat-page"><aside class="chat-sidebar"><div class="field"><label>Предмет</label><select class="select" id="ai-subject" onchange="changeAiSettings()">${state.home?.subjects?.map(s=>`<option ${s===state.ai.subject?'selected':''}>${html(s)}</option>`).join('')||['Алгебра','Геометрия','Физика','Русский язык','История','Биология'].map(s=>`<option>${html(s)}</option>`).join('')}</select></div><div class="field"><label>Модель</label>${modelSelect()}</div><div class="notice" id="ai-quota">${quotaText()}</div></aside><section class="chat-main"><div class="chat-head"><div><h2>${html(state.ai.subject)}</h2><div class="quota">История хранится 24 часа</div></div><button class="btn btn-ghost btn-small" onclick="clearAIChat()">Очистить</button></div><div class="messages" id="ai-messages">${state.ai.messages.map(m=>`<div class="bubble ${m.role==='user'?'user':'ai'}"><div>${html(m.content)}</div><div class="bubble-meta">${m.role==='user'?'Вы':html(m.model||state.ai.model)} · ${date(m.created_at)}</div></div>`).join('')||'<div class="empty">Начните диалог.</div>'}</div><div class="chat-compose"><textarea class="textarea" id="ai-input" placeholder="Например: объясни решение задачи…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAI()}"></textarea><button class="btn btn-primary send" onclick="sendAI()">➤</button></div></section></div>`,quickButtons())}
 function quotaText(){const q=state.ai.quota;if(!q)return 'Загрузка лимита…';return q.limit===Infinity?'Лимит: без ограничений':`Использовано: ${q.used}/${q.limit} за 12 часов`}
 async function loadAI(){try{const d=await api('/api/ai/chat/history');state.ai.messages=d.messages||[];state.ai.quota=d.quota;render()}catch(e){toast(e.message,true)}}
@@ -143,7 +162,27 @@ function changeAiSettings(){state.ai.subject=$('#ai-subject').value;state.ai.mod
 async function sendAI(){const input=$('#ai-input'),message=input?.value.trim();if(!message)return;try{input.value='';const old=state.ai.messages;old.push({role:'user',content:message,model:state.ai.model,created_at:new Date().toISOString()});render();const d=await api('/api/ai/chat',{method:'POST',body:JSON.stringify({subject:state.ai.subject,model:state.ai.model,message})});state.ai.messages=state.ai.messages.filter(x=>x.created_at!==old[old.length-1]?.created_at);state.ai.messages.push({role:'user',content:message,model:state.ai.model,created_at:new Date().toISOString()},{role:'assistant',content:d.answer,model:state.ai.model,created_at:new Date().toISOString()});state.ai.quota=d.quota;render();scrollChat('#ai-messages')}catch(e){toast(e.message,true);loadAI()}}
 async function clearAIChat(){try{await api('/api/ai/chat/history',{method:'DELETE'});state.ai.messages=[];state.ai.quota=await api('/api/ai/chat/history').then(x=>x.quota);render();toast('История очищена')}catch(e){toast(e.message,true)}}
 function scrollChat(sel){setTimeout(()=>{const el=$(sel);if(el)el.scrollTop=el.scrollHeight},20)}
-async function solveHomework(id){try{openModal('AI решает…','<div class="empty">Подбираю материал из учебников и готовлю решение…</div>',true);const d=await api('/api/ai/solve/'+id,{method:'POST',body:JSON.stringify({model:state.ai.model==='gemini'?'gemini':'chatgpt'})});showSolution(d.solution)}catch(e){closeModal();toast(e.message,true)}}
+async function solveHomework(id){
+    try{
+        openModal(
+            'Gemini решает…',
+            '<div class="empty">Подбираю материал из учебников и готовлю решение с помощью Gemini…</div>',
+            true
+        );
+
+        const d=await api('/api/ai/solve/'+id,{
+            method:'POST',
+            body:JSON.stringify({
+                model:'gemini'
+            })
+        });
+
+        showSolution(d.solution);
+    }catch(e){
+        closeModal();
+        toast(e.message,true);
+    }
+}
 function showSolution(s){openModal(`${html(s.subject)} · решение AI`,'');state.modal.body=`<div class="hint" style="margin-bottom:10px">Модель: ${html(s.model)} · хранится до ${date(s.expires_at)}</div><div class="solution-content">${html(s.solution)}</div>`;renderModal()}
 async function openSolutions(){try{const d=await api('/api/ai/solutions');state.solutionCache=d.solutions||[];openModal('Решения AI',state.solutionCache.length?`<div class="solution-list">${state.solutionCache.map((s,i)=>`<button class="solution-item" onclick="showSolutionByIndex(${i})"><b>${html(s.subject)}</b><div class="hint">${date(s.created_at)}</div><div class="muted" style="margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${html(s.question)}</div></button>`).join('')}</div>`:'<div class="empty">Здесь пока нет решений.</div>',true)}catch(e){toast(e.message,true)}}
 function showSolutionByIndex(index){const s=state.solutionCache?.[Number(index)];if(s)showSolution(s)}

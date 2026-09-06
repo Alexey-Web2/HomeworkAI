@@ -30,7 +30,7 @@ const SUBJECTS = [
 ];
 const PLANS = {
   Standard: { price: 0, days: 0, models: [], messages12h: 0 },
-  Start: { price: 25, days: 7, models: ['chatgpt'], messages12h: 5 },
+  Start: { price: 25, days: 7, models: ['gemini'], messages12h: 5 },
   Plus: { price: 50, days: 7, models: ['chatgpt','gemini'], messages12h: 10 },
   Pro: { price: 100, days: 7, models: ['chatgpt','gemini'], messages12h: Infinity }
 };
