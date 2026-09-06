@@ -49,7 +49,6 @@ function validUsername(value) { return /^[A-Za-z0-9_-]{1,20}$/.test(value); }
 function containsEmoji(value) { return /[\u{1F300}-\u{1FAFF}\u{1F1E6}-\u{1F1FF}\u2600-\u27BF\u{1F900}-\u{1F9FF}]/u.test(value); }
 function randomCode() { return crypto.randomInt(100000, 1000000).toString(); }
 function sha256(value) { return crypto.createHash('sha256').update(String(value)).digest('hex'); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function effectivePlan(user) {
   if (!user || !user.plan) return 'Standard';
   if (user.plan !== 'Standard' && user.plan_expires_at && new Date(user.plan_expires_at) <= new Date()) return 'Standard';
@@ -120,7 +119,6 @@ async function serviceRequired(req, res, next) {
   if (data?.stopped) return res.status(503).json({ ok: false, code: 'SERVICE_STOPPED', message: data.message || 'Сервис остановлен.' });
   next();
 }
-async function updateUserTimestamp(userId) { await supabase.from('users').update({ updated_at: nowIso() }).eq('id', userId); }
 
 async function cleanupExpired() {
   const current = nowIso();
@@ -151,7 +149,7 @@ async function seedBase() {
     await supabase.from('homework').upsert({ subject, title: '', body: '', due_text: '' }, { onConflict: 'subject', ignoreDuplicates: true });
   }
   await supabase.from('service_settings').upsert({ id: true, stopped: false, message: '' }, { onConflict: 'id', ignoreDuplicates: true });
-  await supabase.from('faq').upsert({ id: true, content: 'Вставьте сюда ваш FAQ. Он также используется AI поддержки.' }, { onConflict: 'id', ignoreDuplicates: true });
+  await supabase.from('faq').upsert({ id: true, content: 'Вставьте сюда ваш FAQ.' }, { onConflict: 'id', ignoreDuplicates: true });
 }
 
 async function textbookSearch(subject, question, limit = 8) {
@@ -238,23 +236,39 @@ app.post('/api/auth/login', async (req,res) => {
   return res.json({ ok: true, user: safeUser(user) });
 });
 
+console.log('[AUTH] register/start route loaded');
+
 app.post('/api/auth/register/start', async (req,res) => {
   const telegram = normalizeTelegram(req.body.telegram_username);
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(telegram)) return sendError(res,400,'Введите корректный Telegram username.');
+  
+  if (!global.telegramSend) {
+    return sendError(res, 500, 'Telegram-бот не инициализирован на сервере. Проверьте TELEGRAM_BOT_TOKEN.');
+  }
+
   const { data: existing } = await supabase.from('users').select('id').eq('telegram_username', telegram).maybeSingle();
   if (existing) return sendError(res,409,'Этот Telegram уже используется.');
+  
   const { data: link } = await supabase.from('telegram_links').select('chat_id,verified').eq('username',telegram).maybeSingle();
-  if (!link?.chat_id) return sendError(res,400,`Откройте бота и отправьте /start, затем повторите этот шаг. Username: @${telegram}`, { code: 'TELEGRAM_START_REQUIRED' });
+  if (!link?.chat_id) {
+    return sendError(res,400,`Откройте бота в Telegram, нажмите кнопку Начать (/start), затем повторите этот шаг. Ваш Username: @${telegram}`, { code: 'TELEGRAM_START_REQUIRED' });
+  }
+
   const code = randomCode();
   const expires = new Date(Date.now()+5*60*1000).toISOString();
   await supabase.from('telegram_verifications').delete().eq('telegram_username',telegram);
   const { error } = await supabase.from('telegram_verifications').insert({ telegram_username:telegram, telegram_chat_id:link.chat_id, code_hash:sha256(code), expires_at:expires, used:false });
   if (error) return sendError(res,500,'Не удалось создать код подтверждения.');
-  if (global.telegramSend) {
+  
+  try {
     await global.telegramSend(link.chat_id, `HomeworkAI\n\nКод подтверждения регистрации: ${code}\n\nКод действует 5 минут. Не передавайте его другим людям.`);
+    res.json({ ok: true, telegram, expires_at: expires });
+  } catch (err) {
+    console.error('Ошибка отправки сообщения в Telegram:', err);
+    return sendError(res, 500, 'Не удалось отправить сообщение в Telegram. Убедитесь, что вы запустили бота.');
   }
-  res.json({ ok: true, telegram, expires_at: expires });
 });
+
 app.post('/api/auth/register/verify', async (req,res) => {
   const telegram = normalizeTelegram(req.body.telegram_username);
   const code = String(req.body.code || '').trim();
@@ -264,12 +278,14 @@ app.post('/api/auth/register/verify', async (req,res) => {
   await supabase.from('telegram_verifications').update({ used:true }).eq('id',row.id);
   res.json({ ok:true, verified:true });
 });
+
 app.post('/api/auth/register/check-username', async (req,res) => {
   const username = normalizeUsername(req.body.username);
   if (!validUsername(username)) return sendError(res,400,'Никнейм: 1–20 символов, только английские буквы, цифры, _ и -.');
   const { data } = await supabase.from('users').select('id').eq('username',username).maybeSingle();
   res.json({ ok:true, available:!data });
 });
+
 app.post('/api/auth/register/finish', async (req,res) => {
   const telegram = normalizeTelegram(req.body.telegram_username);
   const username = normalizeUsername(req.body.username);
@@ -405,7 +421,7 @@ app.post('/api/support/message', authRequired, serviceRequired, aiLimiter, async
   if (!chat.ai_enabled || chat.human_requested) return res.json({ ok:true, human_mode:true });
   const { data:faq } = await supabase.from('faq').select('content').eq('id',true).maybeSingle();
   const { data:history } = await supabase.from('support_messages').select('sender_type,content').eq('chat_id',chat.id).order('created_at',{ascending:false}).limit(20);
-  const prompt = `Ты AI поддержки HomeworkAI. Отвечай кратко, вежливо и по делу. Ниже FAQ, которым нужно пользоваться. Если вопрос требует действий человека, доступа к аккаунту, модерации, оплаты, удаления аккаунта, изменения плана, блокировки, проверки регистрации, расследования ошибки или ты не уверен — начни ответ с маркера HUMAN_NEEDED. В остальных случаях начни с AI_ONLY. Маркер не скрывай.\n\nFAQ:\n${(faq?.content||'Нет FAQ').slice(0,30000)}\n\nСообщение пользователя:\n${content}`;
+  const prompt = `Ты AI поддержки HomeworkAI. Отвечай кратко, вежливо и по делу. Ниже FAQ, которым нужно пользоваться. Если вопрос требует действий человека — начни ответ с маркера HUMAN_NEEDED. В остальных случаях начни с AI_ONLY.\n\nFAQ:\n${(faq?.content||'Нет FAQ').slice(0,30000)}\n\nСообщение пользователя:\n${content}`;
   let answer;
   try {
     answer = await callAI('deepseek', [
@@ -521,7 +537,7 @@ app.post('/api/admin/deletion/:id', authRequired, roleRequired('admin'), async (
 });
 app.post('/api/admin/plan-request/:id', authRequired, roleRequired('admin'), async (req,res)=>{
   const decision=String(req.body.decision||'');const {data:item}=await supabase.from('plan_requests').select('*').eq('id',req.params.id).maybeSingle();if(!item)return sendError(res,404,'Запрос не найден.');
-  if(decision==='approve'){const plan=PLANS[item.requested_plan];await supabase.from('users').update({plan:item.requested_plan,plan_expires_at:new Date(Date.now()+7*86400000).toISOString(),updated_at:nowIso()}).eq('id',item.user_id);await supabase.from('plan_requests').update({status:'approved'}).eq('id',item.id);}
+  if(decision==='approve'){await supabase.from('users').update({plan:item.requested_plan,plan_expires_at:new Date(Date.now()+7*86400000).toISOString(),updated_at:nowIso()}).eq('id',item.user_id);await supabase.from('plan_requests').update({status:'approved'}).eq('id',item.id);}
   else if(decision==='reject')await supabase.from('plan_requests').update({status:'rejected'}).eq('id',item.id);else return sendError(res,400,'Неверное решение.');res.json({ok:true});
 });
 app.put('/api/admin/homework/:id', authRequired, roleRequired('admin','manager'), async (req,res)=>{
@@ -562,7 +578,6 @@ app.post('/api/admin/textbooks/embed', authRequired, roleRequired('admin'), asyn
   res.json({ok:true,embedded:done,scanned:(rows||[]).length});
 });
 
-
 // ---------------- manager ----------------
 app.get('/api/manager/dashboard', authRequired, roleRequired('admin','manager'), async (req,res)=>{
   const [{data:homework},{data:announcements}]=await Promise.all([
@@ -574,6 +589,8 @@ app.get('/api/manager/dashboard', authRequired, roleRequired('admin','manager'),
 
 // ---------------- Telegram ----------------
 let telegram = null;
+const webhookPath = process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook';
+
 if (process.env.TELEGRAM_BOT_TOKEN) {
   telegram = {
     async call(method, body) {
@@ -582,37 +599,88 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     },
     async send(chat_id,text,extra={}) { return this.call('sendMessage',{chat_id,text,...extra}); },
     async handle(update) {
-      const msg=update?.message;if(!msg?.text)return;
-      const text=msg.text.trim();const chatId=msg.chat.id;const tgUsername=normalizeTelegram(msg.from?.username||'');
-      if(tgUsername){await supabase.from('telegram_links').upsert({username:tgUsername,chat_id:chatId,verified:true,updated_at:nowIso()},{onConflict:'username'});}
-      if(/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) return this.send(chatId,`HomeworkAI\n\nTelegram подтверждён. Вернитесь на сайт и начните регистрацию.\n\nКоманда /dz покажет текущее домашнее задание.`);
-      if(/^\/dz(?:@\w+)?$/i.test(text)) {
-        const {data:service}=await supabase.from('service_settings').select('*').eq('id',true).maybeSingle();
-        if(service?.stopped)return this.send(chatId,`Сервис остановлен\n\n${service.message||''}`);
-        const {data:hw}=await supabase.from('homework').select('*').order('subject');
-        const lines=(hw||[]).map(x=>`<b>${escapeHtmlTelegram(x.subject)}</b>\n${escapeHtmlTelegram(x.body||'ДЗ не задано')}${x.due_text?`\nСрок: ${escapeHtmlTelegram(x.due_text)}`:''}`);
-        return this.send(chatId,lines.join('\n\n')||'Домашнее задание пока не задано.',{parse_mode:'HTML'});
+      const msg = update?.message; if(!msg?.text) return;
+      const text = msg.text.trim(); const chatId = msg.chat.id;
+      const tgUsername = normalizeTelegram(msg.from?.username || '');
+
+      if (!tgUsername) {
+        return this.send(chatId, `⚠️ У вас не установлен Username (имя пользователя) в Telegram.\nПожалуйста, укажите имя пользователя в настройках Telegram (@username), чтобы сайт смог распознать вас.`);
+      }
+
+      await supabase.from('telegram_links').upsert({ username: tgUsername, chat_id: chatId, verified: true, updated_at: nowIso() }, { onConflict: 'username' });
+
+      if (/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+        return this.send(chatId, `HomeworkAI\n\nTelegram подтверждён (@${tgUsername}). Вернитесь на сайт и продолжите регистрацию.\n\nКоманда /dz покажет текущее домашнее задание.`);
+      }
+      if (/^\/dz(?:@\w+)?$/i.test(text)) {
+        const {data:service} = await supabase.from('service_settings').select('*').eq('id',true).maybeSingle();
+        if (service?.stopped) return this.send(chatId, `Сервис остановлен\n\n${service.message||''}`);
+        const {data:hw} = await supabase.from('homework').select('*').order('subject');
+        const lines = (hw||[]).map(x=>`<b>${escapeHtmlTelegram(x.subject)}</b>\n${escapeHtmlTelegram(x.body||'ДЗ не задано')}${x.due_text?`\nСрок: ${escapeHtmlTelegram(x.due_text)}`:''}`);
+        return this.send(chatId, lines.join('\n\n') || 'Домашнее задание пока не задано.', {parse_mode:'HTML'});
       }
     }
   };
+  
   global.telegramSend = telegram.send.bind(telegram);
-  const webhookPath = process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook';
-  app.post(webhookPath, async (req,res)=>{
-    const secret=req.headers['x-telegram-bot-api-secret-token'];
-    if(process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) return res.sendStatus(403);
-    try{await telegram.handle(req.body);res.sendStatus(200);}catch(e){console.error('Telegram update error:',e);res.sendStatus(200);}
+
+  app.post(webhookPath, async (req, res) => {
+    const secret = req.headers['x-telegram-bot-api-secret-token'];
+    if (process.env.TELEGRAM_WEBHOOK_SECRET && secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
+      return res.sendStatus(403);
+    }
+    try {
+      await telegram.handle(req.body);
+      res.sendStatus(200);
+    } catch (e) {
+      console.error('Telegram update error:', e);
+      res.sendStatus(200);
+    }
   });
-  app.get('/api/admin/telegram/setup', authRequired, roleRequired('admin'), async (_req,res)=>{
-    const base=(process.env.APP_URL||'').replace(/\/$/,'');const url=base+webhookPath;
-    if(!base)return sendError(res,400,'APP_URL не настроен.');
-    const result=await telegram.call('setWebhook',{url,secret_token:process.env.TELEGRAM_WEBHOOK_SECRET||undefined,allowed_updates:['message']});res.json({ok:true,result,url});
+
+  app.get('/api/admin/telegram/setup', authRequired, roleRequired('admin'), async (_req, res) => {
+    const base = (process.env.APP_URL || '').replace(/\/$/, '');
+    const url = base + webhookPath;
+    if (!base) return sendError(res, 400, 'APP_URL не настроен.');
+    try {
+      const result = await telegram.call('setWebhook', { url, secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message'] });
+      res.json({ ok: true, result, url });
+    } catch (e) {
+      sendError(res, 500, e.message);
+    }
   });
+} else {
+  console.warn('[WARNING] TELEGRAM_BOT_TOKEN не установлен в .env! Бот работать не будет.');
 }
-function escapeHtmlTelegram(v){return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+async function autoSetupTelegramWebhook() {
+  if (!telegram || !process.env.APP_URL) return;
+  const base = process.env.APP_URL.replace(/\/$/, '');
+  if (!base.startsWith('https://')) {
+    console.warn(`[Telegram] Внимание: APP_URL равен "${base}". Webhook в Telegram требует протокол HTTPS! При тестировании локально используйте ngrok или аналоги.`);
+    return;
+  }
+  const url = base + webhookPath;
+  try {
+    await telegram.call('setWebhook', { url, secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message'] });
+    console.log(`[Telegram] Webhook автоматически зарегистрирован: ${url}`);
+  } catch (err) {
+    console.error(`[Telegram] Ошибка при авто-регистрации Webhook:`, err.message);
+  }
+}
+
+function escapeHtmlTelegram(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ---------------- errors + SPA ----------------
-app.use((err,_req,res,_next)=>{console.error(err);sendError(res,500,'Внутренняя ошибка сервера.');});
+app.use((err,_req,res,_next)=>{ console.error(err); sendError(res,500,'Внутренняя ошибка сервера.'); });
 app.use('/api',(_req,res)=>sendError(res,404,'API маршрут не найден.'));
-app.use((req,res,next)=>{if(req.method!=='GET')return next();res.sendFile(path.join(ROOT,'public','index.html'));});
+app.use((req,res,next)=>{ if(req.method!=='GET') return next(); res.sendFile(path.join(ROOT,'public','index.html')); });
 
-(async()=>{await cleanupExpired();await seedBase();app.listen(PORT,()=>console.log(`HomeworkAI v2 running at http://localhost:${PORT}`));})().catch(err=>{console.error(err);process.exit(1);});
+(async()=>{
+  await cleanupExpired();
+  await seedBase();
+  app.listen(PORT, async () => {
+    console.log(`HomeworkAI v2 running at http://localhost:${PORT}`);
+    await autoSetupTelegramWebhook();
+  });
+})().catch(err=>{ console.error(err); process.exit(1); });
